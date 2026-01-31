@@ -1,0 +1,12 @@
+{
+  "name": "macvisionserver",
+  "version": "1.0.0",
+  "description": "Swift Vision server for face detection and OCR",
+  "scripts": {
+    "build": "swift build -c release",
+    "build:debug": "swift build",
+    "dev": ".build/release/App || (swift build -c release && .build/release/App)",
+    "start": ".build/release/App",
+    "benchmark": "npx tsx benchmark.ts"
+  }
+}

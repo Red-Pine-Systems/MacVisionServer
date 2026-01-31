@@ -1,0 +1,308 @@
+# MacVisionServer
+
+A high-throughput macOS server for face detection and OCR, designed to process large volumes of images using Apple's Vision framework.
+
+## Overview
+
+Vision Server is purpose-built for batch processing scenarios where you need to analyze thousands or millions of images for:
+- **Face detection** with bounding boxes and confidence scores
+- **OCR text extraction** with per-block confidence metrics
+- **OCR quality assessment** to flag pages with recognition issues
+
+The server exposes Apple's Vision framework capabilities over HTTP, allowing non-Swift applications to leverage macOS's native ML acceleration. It handles backpressure gracefully, queues requests during load spikes, and provides detailed timing metrics for performance monitoring.
+
+### Key Design Goals
+
+1. **High throughput** - Process large document batches efficiently with bounded concurrency
+2. **Quality metrics** - OCR confidence scores to identify problematic pages requiring manual review
+3. **Backpressure handling** - Returns 503 with Retry-After when overloaded instead of degrading
+4. **Memory efficiency** - Aggressive memory management to prevent bloat during long-running batches
+
+## Requirements
+
+- macOS 13.0+
+- Swift 5.9+
+- Xcode (for running tests)
+
+## Installation
+
+```bash
+git clone <repository>
+cd MacVisionServer
+swift build -c release
+```
+
+The compiled binary is at `.build/release/App`.
+
+## Usage
+
+### Starting the Server
+
+```bash
+# Development (debug build)
+swift run App
+
+# Production (release build)
+.build/release/App
+
+# With custom configuration
+PORT=3200 MAX_INFLIGHT=6 OCR_LEVEL=accurate .build/release/App
+```
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3100/analyze \
+  -F "image=@document.jpg" \
+  -H "X-Request-Id: doc-001"
+```
+
+### Example Response
+
+```json
+{
+  "schema_version": "1.0",
+  "request_id": "doc-001",
+  "faces": {
+    "detected": true,
+    "count": 1,
+    "items": [{
+      "bounding_box": { "x": 0.078, "y": 0.185, "width": 0.094, "height": 0.204 },
+      "confidence": 0.95
+    }]
+  },
+  "ocr": {
+    "ran": true,
+    "quality": {
+      "avg_confidence": 0.92,
+      "min_confidence": 0.65,
+      "low_confidence_ratio": 0.05,
+      "low_confidence_block_count": 2,
+      "total_block_count": 40
+    },
+    "blocks": [{
+      "text": "John Smith",
+      "bounding_box": { "x": 0.052, "y": 0.463, "width": 0.104, "height": 0.023 },
+      "confidence": 0.98
+    }]
+  },
+  "metrics": {
+    "image_bytes": 150000,
+    "width_px": 1920,
+    "height_px": 1080,
+    "queue_wait_ms": 5.2,
+    "decode_ms": 12.3,
+    "face_ms": 45.6,
+    "ocr_ms": 123.4,
+    "total_ms": 186.5
+  },
+  "server": {
+    "service_version": "1.0.0",
+    "macos_version": "14.0.0"
+  }
+}
+```
+
+**Converting to Pixel Coordinates:**
+
+```javascript
+const pixelX = box.x * response.metrics.width_px;
+const pixelY = box.y * response.metrics.height_px;
+const pixelWidth = box.width * response.metrics.width_px;
+const pixelHeight = box.height * response.metrics.height_px;
+```
+
+## Configuration
+
+All configuration is via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 3100 | HTTP server port |
+| `MAX_INFLIGHT` | 4 | Maximum concurrent Vision processing jobs |
+| `MAX_QUEUE` | MAX_INFLIGHT × 50 | Maximum queued requests (capped at 1000) |
+| `MAX_QUEUE_WAIT_MS` | 5000 | Maximum time a request waits in queue before 503 |
+| `MAX_PROCESSING_MS` | 60000 | Maximum total processing time |
+| `MAX_UPLOAD_BYTES` | 15000000 | Maximum upload size (15MB) |
+| `MAX_IMAGE_DIMENSION_PX` | 6000 | Maximum image width or height |
+| `OCR_LEVEL` | accurate | Recognition level: `fast` or `accurate` |
+| `OCR_LANG_CORRECTION` | true | Enable language model post-processing |
+| `OCR_LANGS` | _(auto)_ | Comma-separated language codes (e.g., `de-DE,en-US`) |
+
+### OCR Quality vs Speed
+
+| `OCR_LEVEL` | Speed | Accuracy | Best For |
+|-------------|-------|----------|----------|
+| `accurate` | ~150-300ms/page | Excellent | Names, addresses, German umlauts, handwriting |
+| `fast` | ~50-100ms/page | Good | Printed text, simple layouts, high-volume scanning |
+
+The `accurate` level uses a larger neural network that significantly improves recognition of:
+- Names (especially non-English)
+- German special characters (ä, ö, ü, ß)
+- Handwritten or stylized text
+- Low-contrast or noisy images
+
+## API Reference
+
+### POST /analyze
+
+Analyze an image for faces and text.
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- Body: `image` field containing JPEG image data
+- Headers: `X-Request-Id` (optional) - echoed in response for correlation
+
+**Response Fields:**
+
+| Field | Description |
+|-------|-------------|
+| `faces.items[].bounding_box` | Normalized coordinates (0..1, origin top-left) |
+| `faces.items[].confidence` | Detection confidence (0.0-1.0) |
+| `ocr.quality.avg_confidence` | Average confidence across all text blocks |
+| `ocr.quality.min_confidence` | Lowest confidence of any block |
+| `ocr.quality.low_confidence_ratio` | Ratio of blocks below 0.7 confidence |
+| `ocr.blocks[].bounding_box` | Normalized coordinates (0..1, origin top-left) |
+| `ocr.blocks[].text` | Recognized text content |
+| `ocr.blocks[].confidence` | Recognition confidence (0.0-1.0) |
+| `metrics.width_px`, `height_px` | Image dimensions in pixels (for denormalization) |
+| `metrics.*` | Timing breakdown in milliseconds |
+
+**Error Responses:**
+
+| Status | Code | Description |
+|--------|------|-------------|
+| 400 | `invalid_image` | Image data is invalid or corrupted |
+| 400 | `image_too_large` | Dimensions exceed MAX_IMAGE_DIMENSION_PX |
+| 413 | `payload_too_large` | Body exceeds MAX_UPLOAD_BYTES |
+| 415 | `unsupported_media_type` | Content-Type must be multipart/form-data |
+| 500 | `internal_error` | Processing failed |
+| 503 | `overloaded` | Server overloaded (includes `Retry-After` header) |
+
+### GET /health
+
+Health check endpoint for monitoring.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "inflight": 2,
+  "queue_depth": 5,
+  "total_processed": 1234,
+  "total_errors": 12,
+  "total_overloaded": 5
+}
+```
+
+## OCR Quality Metrics
+
+The `ocr.quality` object helps identify pages where OCR had issues and may need manual review:
+
+```json
+{
+  "avg_confidence": 0.92,
+  "min_confidence": 0.45,
+  "low_confidence_ratio": 0.08,
+  "low_confidence_block_count": 3,
+  "total_block_count": 40
+}
+```
+
+**Recommended flagging thresholds:**
+- `low_confidence_ratio > 0.1` — More than 10% of blocks are uncertain
+- `min_confidence < 0.5` — At least one block is very uncertain
+
+These metrics enable automated quality control in batch processing pipelines.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    MacVisionServer                       │
+├─────────────────────────────────────────────────────────┤
+│  Sources/App/           │  Vapor HTTP server            │
+│    main.swift           │    - Routes & error handling  │
+│    Routes.swift         │    - Request logging          │
+│    Config.swift         │    - Job queue management     │
+│    JobQueue.swift       │                               │
+│    Models.swift         │                               │
+├─────────────────────────┼───────────────────────────────┤
+│  Sources/VisionCore/    │  Pure domain logic (testable) │
+│    VisionPipeline.swift │    - Face detection           │
+│                         │    - OCR extraction           │
+│                         │    - Quality metrics          │
+└─────────────────────────┴───────────────────────────────┘
+```
+
+The codebase is split into two modules:
+- **VisionCore** — Pure domain logic with no web framework dependencies
+- **App** — Vapor HTTP server that uses VisionCore
+
+This separation enables unit testing of the core logic without spinning up a server.
+
+## Development
+
+### Building
+
+```bash
+# Debug build
+swift build
+
+# Release build (optimized)
+swift build -c release
+```
+
+### Testing
+
+Tests require Xcode to be installed (for XCTest framework).
+
+```bash
+# Ensure Xcode developer tools are selected
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+# Run tests
+swift test
+```
+
+### Request Logging
+
+Each request logs a JSON line to stdout for monitoring:
+
+```json
+{"timestamp":"2024-01-15T10:30:00Z","status":200,"queue_wait_ms":5.2,"total_ms":186.5,"face_count":1,"ocr_block_count":12}
+```
+
+## Performance Tuning
+
+### Finding Optimal MAX_INFLIGHT
+
+Start conservative and increase based on monitoring:
+
+| Hardware | Starting Point | Notes |
+|----------|---------------|-------|
+| M1/M2 Mac Mini | 4 | Good baseline |
+| M1/M2 Pro/Max | 6 | More neural engine cores |
+| M3/M4 | 6-8 | Test stability at higher values |
+
+**Signs of good tuning:**
+- 503 rate < 5%
+- p95 latency < 2× p50 latency
+- CPU utilization 70-90%
+
+**Signs MAX_INFLIGHT is too high:**
+- Increasing latency over time
+- Memory growth
+- Diminishing throughput returns
+
+### Memory Management
+
+The server wraps each request in `autoreleasepool` to prevent memory bloat. If you observe memory growth during long batches:
+
+1. Reduce `MAX_INFLIGHT`
+2. Reduce `MAX_QUEUE`
+3. Monitor with Activity Monitor
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) for details.
