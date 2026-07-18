@@ -117,6 +117,95 @@ struct ServerInfo: Content {
     }
 }
 
+// MARK: - Word-level OCR Response
+
+struct OCRWordsResponse: Content {
+    let schemaVersion: String
+    let requestId: String?
+    let ocr: OCRWordsBody
+    let metrics: WordsMetricsResponse
+    let server: ServerInfo
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case requestId = "request_id"
+        case ocr, metrics, server
+    }
+}
+
+struct OCRWordsBody: Content {
+    let quality: OCRQualityResponse
+    let blocks: [OCRBlockResponse]
+    let words: [OCRWordResponse]
+}
+
+struct OCRWordResponse: Content {
+    let text: String
+    let boundingBox: BoundingBoxResponse
+    let confidence: Float?
+    let blockIndex: Int
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case boundingBox = "bounding_box"
+        case confidence
+        case blockIndex = "block_index"
+    }
+}
+
+struct WordsMetricsResponse: Content {
+    let imageBytes: Int
+    let widthPx: Int
+    let heightPx: Int
+    let queueWaitMs: Double
+    let decodeMs: Double
+    let ocrMs: Double
+    let totalMs: Double
+
+    enum CodingKeys: String, CodingKey {
+        case imageBytes = "image_bytes"
+        case widthPx = "width_px"
+        case heightPx = "height_px"
+        case queueWaitMs = "queue_wait_ms"
+        case decodeMs = "decode_ms"
+        case ocrMs = "ocr_ms"
+        case totalMs = "total_ms"
+    }
+}
+
+// MARK: - Layout (document structure) Request/Response
+//
+// Mirrors the parsing pipeline's `/layout` wire contract (piko_layout/wire.py):
+// request `{"image_b64": "<base64 PNG>"}`, response `{"image": [w, h], "boxes": [...]}`
+// in PIXELS. `label` is a canonical snake_case ElementLabel; unmapped labels are
+// dropped (not fatal) client-side.
+
+struct LayoutRequestBody: Content {
+    let imageB64: String
+
+    enum CodingKeys: String, CodingKey {
+        case imageB64 = "image_b64"
+    }
+}
+
+struct LayoutResponse: Content {
+    let image: [Int]                 // [width_px, height_px]
+    let boxes: [LayoutBoxResponse]
+}
+
+struct LayoutBoxResponse: Content {
+    let polygon: [[Double]]          // 4 [x, y] corners, pixels
+    let bbox: [Double]               // [x1, y1, x2, y2], pixels
+    let label: String                // canonical snake_case ElementLabel
+    let confidence: Float?
+    let position: Int
+    // Vision's transcribed text for this region (empty for tables, whose content
+    // is transcribed downstream from the crop). Extra vs. the parsing wire
+    // contract, which ignores unknown fields; carried so consumers get Apple
+    // Vision's on-device text for free (handwriting, PII pre-detection, etc.).
+    let text: String
+}
+
 // MARK: - Error Response
 
 struct ErrorResponse: Content {
@@ -140,6 +229,7 @@ enum APIError: Error {
     case unsupportedMediaType
     case overloaded(retryAfterSeconds: Int)
     case imageTooLarge(width: Int, height: Int, maxDimension: Int)
+    case layoutUnavailable
     case internalError(String)
 
     var code: String {
@@ -149,6 +239,7 @@ enum APIError: Error {
         case .unsupportedMediaType: return "unsupported_media_type"
         case .overloaded: return "overloaded"
         case .imageTooLarge: return "image_too_large"
+        case .layoutUnavailable: return "layout_unavailable"
         case .internalError: return "internal_error"
         }
     }
@@ -165,6 +256,8 @@ enum APIError: Error {
             return "Server is overloaded, please retry after \(retryAfter) seconds"
         case .imageTooLarge(let width, let height, let maxDimension):
             return "Image dimensions \(width)x\(height) exceed maximum of \(maxDimension)px"
+        case .layoutUnavailable:
+            return "Document layout detection requires macOS 26 or newer"
         case .internalError(let detail):
             return "Internal server error: \(detail)"
         }
@@ -177,6 +270,7 @@ enum APIError: Error {
         case .unsupportedMediaType: return .unsupportedMediaType
         case .overloaded: return .serviceUnavailable
         case .imageTooLarge: return .badRequest
+        case .layoutUnavailable: return .notImplemented
         case .internalError: return .internalServerError
         }
     }
