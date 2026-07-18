@@ -2,6 +2,7 @@ import Foundation
 import Vision
 import ImageIO
 import CoreGraphics
+import DataDetection
 
 // MARK: - Timing Utilities
 
@@ -228,10 +229,27 @@ public struct LayoutRegion {
     }
 }
 
+/// A structured data value Apple Vision detected on-device (email, phone, postal
+/// address, date, money amount, tracking/payment id, …) with its position.
+/// Vision surfaces these for free inside `RecognizeDocumentsRequest`; they're
+/// valuable as PII pre-detection (redaction) and structured extraction.
+public struct DetectedDatum {
+    public let kind: String         // "email" | "phone" | "address" | "date" | ...
+    public let value: String
+    public let bboxPx: PixelBox     // pixels, top-left origin
+
+    public init(kind: String, value: String, bboxPx: PixelBox) {
+        self.kind = kind
+        self.value = value
+        self.bboxPx = bboxPx
+    }
+}
+
 public struct LayoutResult {
     public let width: Int
     public let height: Int
     public let regions: [LayoutRegion]
+    public let detectedData: [DetectedDatum]
     public let decodeMs: Double
     public let layoutMs: Double
 }
@@ -538,16 +556,65 @@ public struct VisionPipeline {
 
         guard let container = observations.first?.document else {
             return LayoutResult(
-                width: width, height: height, regions: [],
+                width: width, height: height, regions: [], detectedData: [],
                 decodeMs: decodeMs, layoutMs: msFrom(startLayout)
             )
         }
 
         let regions = Self.walkDocument(container, width: width, height: height)
+        let detected = Self.extractDetectedData(container, width: width, height: height)
         return LayoutResult(
-            width: width, height: height, regions: regions,
+            width: width, height: height, regions: regions, detectedData: detected,
             decodeMs: decodeMs, layoutMs: msFrom(startLayout)
         )
+    }
+
+    /// Flatten Vision's on-device data-detector matches (email/phone/address/date/
+    /// money/…) with position. Consumes the top-level text and every paragraph —
+    /// NOT the nested table-cell / list-item containers, whose `content` recursively
+    /// references itself (descending stack-overflows the server). The top-level
+    /// text collection already surfaces the matches. Dedupes by (kind, value, box).
+    @available(macOS 26, *)
+    static func extractDetectedData(
+        _ container: DocumentObservation.Container, width: Int, height: Int
+    ) -> [DetectedDatum] {
+        var out: [DetectedDatum] = []
+        var seen = Set<String>()
+
+        func consume(_ text: DocumentObservation.Container.Text) {
+            for match in text.detectedData {
+                guard let (kind, value) = describeMatch(match.match) else { continue }
+                let box = toPixelBox(match.boundingRegion, width: width, height: height)
+                let key = "\(kind)|\(value)|\(Int(box.x1))|\(Int(box.y1))"
+                if seen.insert(key).inserted {
+                    out.append(DetectedDatum(kind: kind, value: value, bboxPx: box))
+                }
+            }
+        }
+        consume(container.text)
+        for p in container.paragraphs { consume(p) }
+        return out
+    }
+
+    /// Map a DataDetector match to (kind, value). Pure-ish: the switch is over
+    /// Vision enum cases (needs macOS 26), but carries no geometry.
+    @available(macOS 26, *)
+    static func describeMatch(_ match: DataDetector.Match) -> (String, String)? {
+        switch match.details {
+        case .link(let l): return ("link", l.url.absoluteString)
+        case .emailAddress(let e): return ("email", e.emailAddress)
+        case .phoneNumber(let p): return ("phone", p.phoneNumber)
+        case .postalAddress(let a):
+            return ("address", a.fullAddress.replacingOccurrences(of: "\n", with: ", "))
+        case .calendarEvent(let c):
+            return c.startDate.map { ("date", ISO8601DateFormatter().string(from: $0)) }
+        case .moneyAmount(let m): return ("money", "\(m.amount) \(m.currency.identifier)")
+        case .shipmentTrackingNumber(let s): return ("tracking", "\(s.carrier) \(s.trackingNumber)")
+        case .measurement(let m): return ("measurement", "\(m.value)")
+        case .paymentIdentifier(let p): return ("payment", p.identifier)
+        case .flightNumber(let fl): return ("flight", "\(fl.airlineCode)\(fl.flightNumber)")
+        @unknown default: return nil
+        }
     }
 
     // MARK: - Pure layout helpers

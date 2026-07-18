@@ -315,9 +315,16 @@ func routes(_ app: Application, config: Config, jobQueue: JobQueue, pipeline: Vi
                 )
             }
 
+            let detectedData = layoutResult.detectedData.map { d -> DetectedDataResponse in
+                let b = d.bboxPx
+                return DetectedDataResponse(kind: d.kind, value: d.value,
+                                            bbox: [b.x1, b.y1, b.x2, b.y2])
+            }
+
             let response = LayoutResponse(
                 image: [layoutResult.width, layoutResult.height],
-                boxes: boxes
+                boxes: boxes,
+                detectedData: detectedData
             )
 
             logRequest(

@@ -191,6 +191,21 @@ struct LayoutRequestBody: Content {
 struct LayoutResponse: Content {
     let image: [Int]                 // [width_px, height_px]
     let boxes: [LayoutBoxResponse]
+    // Apple Vision's on-device data-detector hits (email/phone/address/date/…)
+    // with position. Extra vs. the parsing contract; valuable for PII redaction
+    // and structured extraction.
+    let detectedData: [DetectedDataResponse]
+
+    enum CodingKeys: String, CodingKey {
+        case image, boxes
+        case detectedData = "detected_data"
+    }
+}
+
+struct DetectedDataResponse: Content {
+    let kind: String                 // email | phone | address | date | money | ...
+    let value: String
+    let bbox: [Double]               // [x1, y1, x2, y2], pixels
 }
 
 struct LayoutBoxResponse: Content {
