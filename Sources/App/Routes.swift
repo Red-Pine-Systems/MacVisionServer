@@ -311,7 +311,11 @@ func routes(_ app: Application, config: Config, jobQueue: JobQueue, pipeline: Vi
                     label: region.label,
                     confidence: region.confidence,
                     position: region.position,
-                    text: region.text
+                    text: region.text,
+                    lines: region.lines.map { SubBoxResponse(text: $0.text,
+                        bbox: [$0.bboxPx.x1, $0.bboxPx.y1, $0.bboxPx.x2, $0.bboxPx.y2]) },
+                    words: region.words.map { SubBoxResponse(text: $0.text,
+                        bbox: [$0.bboxPx.x1, $0.bboxPx.y1, $0.bboxPx.x2, $0.bboxPx.y2]) }
                 )
             }
 

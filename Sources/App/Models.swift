@@ -219,6 +219,15 @@ struct LayoutBoxResponse: Content {
     // contract, which ignores unknown fields; carried so consumers get Apple
     // Vision's on-device text for free (handwriting, PII pre-detection, etc.).
     let text: String
+    // Finer-grained boxes inside the region: recognized lines and words, each
+    // with its text + pixel bbox. For precise redaction / region OCR.
+    let lines: [SubBoxResponse]
+    let words: [SubBoxResponse]
+}
+
+struct SubBoxResponse: Content {
+    let text: String
+    let bbox: [Double]               // [x1, y1, x2, y2], pixels
 }
 
 // MARK: - Error Response

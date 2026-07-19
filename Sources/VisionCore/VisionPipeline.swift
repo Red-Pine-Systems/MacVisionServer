@@ -211,6 +211,18 @@ public struct PixelBox: Equatable {
 
 /// One layout region = one structural element (paragraph / table / list item),
 /// mapped to a canonical `piko_layout` ElementLabel value.
+/// A finer-grained box inside a region: one recognized line or word, with its
+/// text and pixel box. Used for precise redaction / region OCR.
+public struct SubBox {
+    public let text: String
+    public let bboxPx: PixelBox
+
+    public init(text: String, bboxPx: PixelBox) {
+        self.text = text
+        self.bboxPx = bboxPx
+    }
+}
+
 public struct LayoutRegion {
     public let label: String        // canonical ElementLabel.value (snake_case)
     public let bboxPx: PixelBox     // pixels, top-left origin
@@ -220,13 +232,20 @@ public struct LayoutRegion {
     /// content GLM transcribes from the crop). The parsing client ignores this
     /// extra field; it's carried for consumers that want text for free.
     public let text: String
+    /// Line-level boxes inside this region (Vision `lines`).
+    public let lines: [SubBox]
+    /// Word-level boxes inside this region (Vision `words`).
+    public let words: [SubBox]
 
-    public init(label: String, bboxPx: PixelBox, confidence: Float?, position: Int, text: String) {
+    public init(label: String, bboxPx: PixelBox, confidence: Float?, position: Int,
+                text: String, lines: [SubBox] = [], words: [SubBox] = []) {
         self.label = label
         self.bboxPx = bboxPx
         self.confidence = confidence
         self.position = position
         self.text = text
+        self.lines = lines
+        self.words = words
     }
 }
 
@@ -731,7 +750,9 @@ public struct VisionPipeline {
             let box = toPixelBox(title.boundingRegion, width: width, height: height)
             claimedBoxes.append(box)
             raw.append(RawRegion(label: LayoutLabel.title, box: box,
-                                 confidence: nil, text: title.transcript))
+                                 confidence: nil, text: title.transcript,
+                                 lines: subBoxes(title.lines, width: width, height: height),
+                                 words: subBoxes(title.words ?? [], width: width, height: height)))
         }
 
         for paragraph in container.paragraphs {
@@ -744,10 +765,23 @@ public struct VisionPipeline {
             let isHeader = paragraph.lines.contains { $0.isTitle }
             let label = isHeader ? LayoutLabel.sectionHeader : LayoutLabel.text
             raw.append(RawRegion(label: label, box: box,
-                                 confidence: nil, text: paragraph.transcript))
+                                 confidence: nil, text: paragraph.transcript,
+                                 lines: subBoxes(paragraph.lines, width: width, height: height),
+                                 words: subBoxes(paragraph.words ?? [], width: width, height: height)))
         }
 
         return orderRegions(raw)
+    }
+
+    /// Convert Vision line/word observations to `SubBox`es (text + pixel box).
+    @available(macOS 26, *)
+    static func subBoxes(
+        _ observations: [RecognizedTextObservation], width: Int, height: Int
+    ) -> [SubBox] {
+        observations.map { obs in
+            SubBox(text: obs.transcript,
+                   bboxPx: toPixelBox(obs.boundingRegion, width: width, height: height))
+        }
     }
 
     /// True if `b` is largely contained in `a` (or vice versa) — used to drop the
@@ -787,7 +821,9 @@ public struct VisionPipeline {
                 bboxPx: entry.element.box,
                 confidence: entry.element.confidence,
                 position: position,
-                text: entry.element.text
+                text: entry.element.text,
+                lines: entry.element.lines,
+                words: entry.element.words
             )
         }
     }
@@ -800,12 +836,17 @@ public struct RawRegion {
     public let box: PixelBox
     public let confidence: Float?
     public let text: String
+    public let lines: [SubBox]
+    public let words: [SubBox]
 
-    public init(label: String, box: PixelBox, confidence: Float?, text: String) {
+    public init(label: String, box: PixelBox, confidence: Float?, text: String,
+                lines: [SubBox] = [], words: [SubBox] = []) {
         self.label = label
         self.box = box
         self.confidence = confidence
         self.text = text
+        self.lines = lines
+        self.words = words
     }
 }
 
