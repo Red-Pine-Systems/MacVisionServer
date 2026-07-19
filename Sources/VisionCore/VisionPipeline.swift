@@ -265,11 +265,42 @@ public struct DetectedDatum {
     }
 }
 
+/// One whole-image classification label (e.g. "document", "handwriting", "art").
+public struct ImageLabel {
+    public let identifier: String
+    public let confidence: Float
+    public init(identifier: String, confidence: Float) {
+        self.identifier = identifier
+        self.confidence = confidence
+    }
+}
+
+/// The document boundary Vision segmented out of the image — four pixel corners
+/// (top-left origin) plus confidence. Use for auto-crop / deskew of a photographed
+/// page. Nil when no page boundary was found.
+public struct DocumentQuad {
+    public let topLeft: [Double]      // [x, y] pixels
+    public let topRight: [Double]
+    public let bottomRight: [Double]
+    public let bottomLeft: [Double]
+    public let confidence: Float
+    public init(topLeft: [Double], topRight: [Double],
+                bottomRight: [Double], bottomLeft: [Double], confidence: Float) {
+        self.topLeft = topLeft
+        self.topRight = topRight
+        self.bottomRight = bottomRight
+        self.bottomLeft = bottomLeft
+        self.confidence = confidence
+    }
+}
+
 public struct LayoutResult {
     public let width: Int
     public let height: Int
     public let regions: [LayoutRegion]
     public let detectedData: [DetectedDatum]
+    public let classification: [ImageLabel]
+    public let documentQuad: DocumentQuad?
     public let decodeMs: Double
     public let layoutMs: Double
 }
@@ -574,9 +605,16 @@ public struct VisionPipeline {
             throw VisionError.layoutFailed(error.localizedDescription)
         }
 
+        // Whole-image classification (document / handwriting / art …) and page
+        // segmentation (auto-crop quad) run alongside the document parse. Both are
+        // best-effort — a failure just omits that metadata, never fails /layout.
+        let classification = await Self.classifyImage(cgImage)
+        let documentQuad = await Self.segmentDocument(cgImage, width: width, height: height)
+
         guard let container = observations.first?.document else {
             return LayoutResult(
                 width: width, height: height, regions: [], detectedData: [],
+                classification: classification, documentQuad: documentQuad,
                 decodeMs: decodeMs, layoutMs: msFrom(startLayout)
             )
         }
@@ -586,7 +624,41 @@ public struct VisionPipeline {
         detected += Self.extractNames(container, width: width, height: height)
         return LayoutResult(
             width: width, height: height, regions: regions, detectedData: detected,
+            classification: classification, documentQuad: documentQuad,
             decodeMs: decodeMs, layoutMs: msFrom(startLayout)
+        )
+    }
+
+    /// Whole-image labels, kept above a confidence floor (top-level document type:
+    /// document / printed_page / handwriting / art …). Best-effort.
+    @available(macOS 26, *)
+    static func classifyImage(_ cgImage: CGImage) async -> [ImageLabel] {
+        guard let results = try? await ClassifyImageRequest().perform(on: cgImage) else {
+            return []
+        }
+        return results
+            .filter { $0.confidence >= 0.2 }
+            .sorted { $0.confidence > $1.confidence }
+            .prefix(6)
+            .map { ImageLabel(identifier: $0.identifier, confidence: $0.confidence) }
+    }
+
+    /// The page boundary Vision segments, as a pixel-space quad (auto-crop). Best-
+    /// effort; nil when no boundary is found.
+    @available(macOS 26, *)
+    static func segmentDocument(_ cgImage: CGImage, width: Int, height: Int) async -> DocumentQuad? {
+        guard let obs = try? await DetectDocumentSegmentationRequest().perform(on: cgImage) else {
+            return nil
+        }
+        let size = CGSize(width: width, height: height)
+        func px(_ p: NormalizedPoint) -> [Double] {
+            let cg = p.toImageCoordinates(size, origin: .upperLeft)
+            return [Double(cg.x), Double(cg.y)]
+        }
+        return DocumentQuad(
+            topLeft: px(obs.topLeft), topRight: px(obs.topRight),
+            bottomRight: px(obs.bottomRight), bottomLeft: px(obs.bottomLeft),
+            confidence: obs.confidence
         )
     }
 

@@ -325,10 +325,22 @@ func routes(_ app: Application, config: Config, jobQueue: JobQueue, pipeline: Vi
                                             bbox: [b.x1, b.y1, b.x2, b.y2])
             }
 
+            let classification = layoutResult.classification.map {
+                ClassificationResponse(identifier: $0.identifier, confidence: $0.confidence)
+            }
+            let documentQuad = layoutResult.documentQuad.map {
+                DocumentQuadResponse(
+                    topLeft: $0.topLeft, topRight: $0.topRight,
+                    bottomRight: $0.bottomRight, bottomLeft: $0.bottomLeft,
+                    confidence: $0.confidence)
+            }
+
             let response = LayoutResponse(
                 image: [layoutResult.width, layoutResult.height],
                 boxes: boxes,
-                detectedData: detectedData
+                detectedData: detectedData,
+                classification: classification,
+                documentQuad: documentQuad
             )
 
             logRequest(

@@ -195,10 +195,37 @@ struct LayoutResponse: Content {
     // with position. Extra vs. the parsing contract; valuable for PII redaction
     // and structured extraction.
     let detectedData: [DetectedDataResponse]
+    // Whole-image classification (document / handwriting / art …) — page-type
+    // routing signal.
+    let classification: [ClassificationResponse]
+    // Segmented page boundary as a pixel quad (auto-crop / deskew). Null if none.
+    let documentQuad: DocumentQuadResponse?
 
     enum CodingKeys: String, CodingKey {
-        case image, boxes
+        case image, boxes, classification
         case detectedData = "detected_data"
+        case documentQuad = "document_quad"
+    }
+}
+
+struct ClassificationResponse: Content {
+    let identifier: String
+    let confidence: Float
+}
+
+struct DocumentQuadResponse: Content {
+    let topLeft: [Double]
+    let topRight: [Double]
+    let bottomRight: [Double]
+    let bottomLeft: [Double]
+    let confidence: Float
+
+    enum CodingKeys: String, CodingKey {
+        case topLeft = "top_left"
+        case topRight = "top_right"
+        case bottomRight = "bottom_right"
+        case bottomLeft = "bottom_left"
+        case confidence
     }
 }
 
