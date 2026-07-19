@@ -3,6 +3,7 @@ import Vision
 import ImageIO
 import CoreGraphics
 import DataDetection
+import NaturalLanguage
 
 // MARK: - Timing Utilities
 
@@ -562,7 +563,8 @@ public struct VisionPipeline {
         }
 
         let regions = Self.walkDocument(container, width: width, height: height)
-        let detected = Self.extractDetectedData(container, width: width, height: height)
+        var detected = Self.extractDetectedData(container, width: width, height: height)
+        detected += Self.extractNames(container, width: width, height: height)
         return LayoutResult(
             width: width, height: height, regions: regions, detectedData: detected,
             decodeMs: decodeMs, layoutMs: msFrom(startLayout)
@@ -616,6 +618,72 @@ public struct VisionPipeline {
         @unknown default: return nil
         }
     }
+
+    // MARK: - Name detection (NaturalLanguage NER)
+
+    /// Personal names Apple's `NLTagger` (.nameType) finds in each paragraph's
+    /// transcript, mapped back to a pixel box via Vision's `boundingRegion(for:)`.
+    /// Apple has no name *data-detector*; NER is a separate on-device framework.
+    /// Names are heuristic (some org/role false positives) — acceptable for
+    /// redaction, where over-detection is safer than a miss.
+    @available(macOS 26, *)
+    static func extractNames(
+        _ container: DocumentObservation.Container, width: Int, height: Int
+    ) -> [DetectedDatum] {
+        var out: [DetectedDatum] = []
+        var seen = Set<String>()
+        let tagger = NLTagger(tagSchemes: [.nameType])
+        let opts: NLTagger.Options = [.omitPunctuation, .omitWhitespace, .joinNames]
+
+        for paragraph in container.paragraphs {
+            let s = paragraph.transcript
+            if s.isEmpty { continue }
+            tagger.string = s
+            tagger.enumerateTags(in: s.startIndex..<s.endIndex, unit: .word,
+                                 scheme: .nameType, options: opts) { tag, range in
+                guard tag == .personalName else { return true }
+                let value = String(s[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard isLikelyName(value) else { return true }
+                guard let region = paragraph.boundingRegion(for: range) else { return true }
+                let box = toPixelBox(region, width: width, height: height)
+                let key = "\(value)|\(Int(box.x1))|\(Int(box.y1))"
+                if seen.insert(key).inserted {
+                    out.append(DetectedDatum(kind: "name", value: value, bboxPx: box))
+                }
+                return true
+            }
+        }
+        return out
+    }
+
+    /// Conservative filter over NLTagger name candidates. Pure + unit-testable.
+    /// Drops the common false positives (short filler words like "Ihre"/"Pos",
+    /// all-lowercase tokens, non-alphabetic) while keeping real personal names.
+    static func isLikelyName(_ candidate: String) -> Bool {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count < 3 { return false }
+        // Must contain a letter and start uppercase (proper noun).
+        guard let first = trimmed.first, first.isUppercase else { return false }
+        // Reject tokens with digits (article numbers, codes misread as names).
+        if trimmed.contains(where: { $0.isNumber }) { return false }
+        // A short single common word is likely a header/filler.
+        let words = trimmed.split(separator: " ")
+        if words.count == 1 {
+            if trimmed.count <= 3 { return false }
+            // Common German filler words NLTagger mistags as single-word names.
+            if nameStopwords.contains(trimmed.lowercased()) { return false }
+        }
+        return true
+    }
+
+    /// Single-token words NLTagger commonly mis-tags as personal names in German
+    /// business documents. Only applied to single-word candidates so real
+    /// surnames are never dropped.
+    static let nameStopwords: Set<String> = [
+        "ihre", "ihr", "nach", "vor", "über", "unter", "sehr", "geehrte",
+        "herr", "frau", "pos", "art", "menge", "datum", "seite", "kunde",
+        "bearbeiter", "vertreter", "porto", "verpackung", "summe",
+    ]
 
     // MARK: - Pure layout helpers
 

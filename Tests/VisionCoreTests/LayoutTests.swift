@@ -82,6 +82,33 @@ final class LayoutTests: XCTestCase {
         XCTAssertFalse(VisionPipeline.boxesOverlapHeavily(box(0,0,100,100), box(90,0,190,100)))
     }
 
+    // MARK: - isLikelyName (NER false-positive filter)
+
+    func testName_realNamesPass() {
+        XCTAssertTrue(VisionPipeline.isLikelyName("Andreas Martin"))
+        XCTAssertTrue(VisionPipeline.isLikelyName("Percy Dengler"))
+        XCTAssertTrue(VisionPipeline.isLikelyName("Schweikert"))
+    }
+
+    func testName_fillerAndShortRejected() {
+        XCTAssertFalse(VisionPipeline.isLikelyName("Pos"))   // 3 chars, single word
+        XCTAssertFalse(VisionPipeline.isLikelyName("ab"))    // too short
+        XCTAssertFalse(VisionPipeline.isLikelyName("nico"))  // lowercase start (proper nouns are capitalized)
+    }
+
+    func testName_digitsRejected() {
+        XCTAssertFalse(VisionPipeline.isLikelyName("Art 4711"))
+        XCTAssertFalse(VisionPipeline.isLikelyName("DE12345"))
+    }
+
+    func testName_singleWordStopwordsRejected() {
+        XCTAssertFalse(VisionPipeline.isLikelyName("Ihre"))
+        XCTAssertFalse(VisionPipeline.isLikelyName("Nach"))
+        XCTAssertFalse(VisionPipeline.isLikelyName("Kunde"))
+        // But a stopword as part of a real multi-word name is kept.
+        XCTAssertTrue(VisionPipeline.isLikelyName("Herr Fischer"))
+    }
+
     // MARK: - Canonical labels match the wire contract (snake_case)
 
     func testLayoutLabelsAreCanonicalSnakeCase() {
