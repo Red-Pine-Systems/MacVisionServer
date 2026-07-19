@@ -610,10 +610,16 @@ public struct VisionPipeline {
         // best-effort — a failure just omits that metadata, never fails /layout.
         let classification = await Self.classifyImage(cgImage)
         let documentQuad = await Self.segmentDocument(cgImage, width: width, height: height)
+        // Barcodes/QR (payload + box) and faces (box) — both on-device, best-effort.
+        // Emitted into detected_data alongside the text data-detector hits, so a
+        // consumer gets one PII/asset stream. Bilder/Grafiken bleiben paddle's Job.
+        let barcodes = await Self.extractBarcodes(cgImage, width: width, height: height)
+        let faces = await Self.extractFaces(cgImage, width: width, height: height)
 
         guard let container = observations.first?.document else {
             return LayoutResult(
-                width: width, height: height, regions: [], detectedData: [],
+                width: width, height: height, regions: [],
+                detectedData: barcodes + faces,
                 classification: classification, documentQuad: documentQuad,
                 decodeMs: decodeMs, layoutMs: msFrom(startLayout)
             )
@@ -622,6 +628,8 @@ public struct VisionPipeline {
         let regions = Self.walkDocument(container, width: width, height: height)
         var detected = Self.extractDetectedData(container, width: width, height: height)
         detected += Self.extractNames(container, width: width, height: height)
+        detected += barcodes
+        detected += faces
         return LayoutResult(
             width: width, height: height, regions: regions, detectedData: detected,
             classification: classification, documentQuad: documentQuad,
@@ -660,6 +668,43 @@ public struct VisionPipeline {
             bottomRight: px(obs.bottomRight), bottomLeft: px(obs.bottomLeft),
             confidence: obs.confidence
         )
+    }
+
+    /// Barcodes / QR codes with their decoded payload + pixel box. kind is
+    /// "qr" for QR symbology, else "barcode"; value is the payload string.
+    @available(macOS 26, *)
+    static func extractBarcodes(_ cgImage: CGImage, width: Int, height: Int) async -> [DetectedDatum] {
+        guard let results = try? await DetectBarcodesRequest().perform(on: cgImage) else {
+            return []
+        }
+        let size = CGSize(width: width, height: height)
+        return results.map { obs in
+            let rect = obs.boundingBox.toImageCoordinates(size, origin: .upperLeft)
+            let kind = String(describing: obs.symbology).lowercased().contains("qr") ? "qr" : "barcode"
+            return DetectedDatum(
+                kind: kind,
+                value: obs.payloadString ?? "",
+                bboxPx: PixelBox(x1: Double(rect.minX), y1: Double(rect.minY),
+                                 x2: Double(rect.maxX), y2: Double(rect.maxY)))
+        }
+    }
+
+    /// Detected faces as pixel boxes (kind "face", value = confidence). Valuable
+    /// for redaction (IDs / photos). Same detector as /analyze.
+    @available(macOS 26, *)
+    static func extractFaces(_ cgImage: CGImage, width: Int, height: Int) async -> [DetectedDatum] {
+        guard let results = try? await DetectFaceRectanglesRequest().perform(on: cgImage) else {
+            return []
+        }
+        let size = CGSize(width: width, height: height)
+        return results.map { obs in
+            let rect = obs.boundingBox.toImageCoordinates(size, origin: .upperLeft)
+            return DetectedDatum(
+                kind: "face",
+                value: String(format: "%.2f", obs.confidence),
+                bboxPx: PixelBox(x1: Double(rect.minX), y1: Double(rect.minY),
+                                 x2: Double(rect.maxX), y2: Double(rect.maxY)))
+        }
     }
 
     /// Flatten Vision's on-device data-detector matches (email/phone/address/date/
